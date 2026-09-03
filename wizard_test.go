@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,5 +120,20 @@ func TestListenFlagIsNotPersisted(t *testing.T) {
 	}
 	if again.Codespace != "cs-1" {
 		t.Fatalf("该记住的东西没记住：%q", again.Codespace)
+	}
+}
+
+// 网络不通不能被当成"token 是错的"：那样用户白填一遍还得重新去 GitHub 复制。
+func TestTokenRejectedOnlyWhenGitHubSaysSo(t *testing.T) {
+	githubSaidNo := &apiError{Status: 401, Method: "GET", Path: "/user", Message: "Bad credentials"}
+	if !tokenRejected(githubSaidNo) {
+		t.Fatal("401 应该算 token 被拒")
+	}
+	if !tokenRejected(fmt.Errorf("包一层：%w", githubSaidNo)) {
+		t.Fatal("包过一层的 401 也应该算")
+	}
+	netErr := fmt.Errorf("请求 GET /user：%w", errors.New("net/http: TLS handshake timeout"))
+	if tokenRejected(netErr) {
+		t.Fatal("网络错误不该算 token 被拒")
 	}
 }

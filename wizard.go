@@ -143,6 +143,13 @@ func maskToken(t string) string {
 	return t[:4] + "…" + t[len(t)-4:]
 }
 
+// tokenRejected 区分"GitHub 明确说这个 token 不行"和"根本没连上 GitHub"。
+// 后者不该让用户白填一遍（这台机器的网络就经常抖）。
+func tokenRejected(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae)
+}
+
 // verifyToken 当场拿 token 去问 GitHub，别等到第一次 ssh 才发现填错了。
 func verifyToken(ctx context.Context, token string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -150,8 +157,13 @@ func verifyToken(ctx context.Context, token string) bool {
 	a := newAPI(token)
 	login, err := a.currentUser(ctx)
 	if err != nil {
-		failLine("token 用不了：%v", err)
-		return false
+		if tokenRejected(err) {
+			failLine("token 用不了：%v", err)
+			return false
+		}
+		failLine("没连上 GitHub：%v", err)
+		fmt.Printf("  %s这看着是网络问题，不一定是 token 的错%s\n", cDim, cReset)
+		return confirm("先把这个 token 存下来，等网络好了再说？", true)
 	}
 	okLine("token 有效：@%s", login)
 	list, err := a.listCodespaces(ctx)
