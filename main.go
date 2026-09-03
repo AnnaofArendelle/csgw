@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const version = "0.1.0"
@@ -72,6 +73,7 @@ func main() {
 func cmdStart(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	listen := fs.String("listen", "", "监听地址（默认 "+defaultListen+"，只能是回环地址）")
+	noVerify := fs.Bool("no-verify", false, "启动时不去问 GitHub 校验 token（离线/脚本场景）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -85,6 +87,11 @@ func cmdStart(ctx context.Context, args []string) error {
 	}
 	if !cfg.hasToken(ctx) {
 		if err := runWizard(ctx, cfg); err != nil {
+			return err
+		}
+	}
+	if !*noVerify {
+		if err := checkTokenBeforeServing(ctx, cfg); err != nil {
 			return err
 		}
 	}
@@ -113,6 +120,55 @@ func cmdStart(ctx context.Context, args []string) error {
 		cBright, hostAlias, cReset)
 
 	return gw.serve(ctx)
+}
+
+// checkTokenBeforeServing 在开始监听之前先确认 token 还能用。
+//
+// 光有一个 token 字符串不等于它有效：过期、被撤销、权限不对，网关照样能起来，
+// 然后每一次 ssh 都失败，而向导又因为"配置里有 token"不会弹出来。所以：
+//   - GitHub 明确拒绝（401/403）→ 有终端就直接进向导重新填；没终端就报错退出，
+//     让 systemd 之类别装作一切正常
+//   - 只是连不上 GitHub → 打一行提醒照常启动（不能因为网络抖就不干活）
+//   - token 有效但 scope 里没有 codespace → 提醒（这个坑最常见）
+func checkTokenBeforeServing(ctx context.Context, cfg *Config) error {
+	token, err := cfg.token(ctx)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	info, err := newAPI(token).whoami(ctx)
+	switch {
+	case err == nil:
+		fmt.Printf("token 有效：@%s", info.Login)
+		if info.Scopes != "" {
+			fmt.Printf("（权限：%s）", info.Scopes)
+		}
+		fmt.Println()
+		if info.Scopes != "" && !hasScope(info.Scopes, "codespace") {
+			fmt.Fprintf(os.Stderr,
+				"%s: 提醒：这个 token 没有 codespace 权限，连接时一定会失败。"+
+					"去 https://github.com/settings/tokens 补上，或者 `%s setup` 换一个\n", appName, appName)
+		}
+		return nil
+
+	case tokenRejected(err):
+		fmt.Fprintf(os.Stderr, "%s: GitHub 拒绝了现在这个 token：%v\n", appName, err)
+		if !isTTY() {
+			return fmt.Errorf("换一个 token 再启动：`%s setup`（或者设置 $GITHUB_TOKEN）", appName)
+		}
+		fmt.Fprintf(os.Stderr, "%s: 进配置向导换一个…\n\n", appName)
+		if err := runWizard(ctx, cfg); err != nil {
+			return err
+		}
+		return nil
+
+	default:
+		fmt.Fprintf(os.Stderr, "%s: 提醒：暂时连不上 GitHub（%v），先照常启动；"+
+			"真正 ssh 的时候会再试\n", appName, brief(err))
+		return nil
+	}
 }
 
 func cmdSetup(ctx context.Context) error {

@@ -104,10 +104,28 @@ Host codespace
 
 ```
 csgw                启动（没配置过就先走向导）
+csgw -listen 127.0.0.1:2223   换端口（只影响本次，不写进配置文件）
+csgw -no-verify     启动时不问 GitHub 校验 token（离线/脚本场景）
 csgw setup          重新配置
 csgw ssh-config     打印那段 ssh 配置（-write 写入 / -remove 删除）
 csgw version
 ```
+
+### token 填错 / 过期 / 权限不对会怎样
+
+"配置里有一个 token"不等于它能用，所以启动时会先问一次 GitHub（`GET /user`，一次往返）：
+
+| 情况 | 行为 |
+|---|---|
+| 有效 | 打印 `token 有效：@你的账号（权限：…）`，正常启动 |
+| 有效但没有 `codespace` 权限 | 照常启动，但明确警告"连接时一定会失败"（这个坑最常见） |
+| GitHub 明确拒绝（401/403） | **有终端就直接进向导让你换一个**；没终端（systemd/脚本）就报错退出 1，不会装作一切正常 |
+| 连不上 GitHub | 只打一行提醒，照常启动 —— 网络抖不该让网关罢工，真正 ssh 的时候会再试 |
+| 不想启动时联网 | 加 `-no-verify` |
+
+没有 token 时：非交互环境报错退出（并告诉你跑 `csgw setup`），交互环境进向导；
+向导里不填 token 就选"保存并启动"会被拦住，Esc 退出则不留任何半成品配置文件。
+运行期间 token 被撤销的话，错误会打到 ssh 客户端的终端上，并附一句"跑 `csgw setup` 换一个"。
 
 配置和密钥都在 `~/.config/csgw/`（0700）：`config.json`(0600)、`gateway_ed25519`（前门 host key，
 固定不换，所以不会报 host key 变了；真丢了就删掉 `~/.ssh/known_hosts.csgw`）、`codespace_ed25519(.pub)`（登录 codespace 用，由 gh 注册进去）、

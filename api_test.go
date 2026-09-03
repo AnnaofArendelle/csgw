@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ type fakeGitHub struct {
 	mu sync.Mutex
 
 	login      string
+	scopes     string
 	codespaces map[string]*codespace
 	repos      map[string]int64
 
@@ -58,6 +60,9 @@ func (f *fakeGitHub) route(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
 	case path == "/user" && r.Method == "GET":
+		if f.scopes != "" {
+			w.Header().Set("X-OAuth-Scopes", f.scopes)
+		}
 		json.NewEncoder(w).Encode(map[string]string{"login": f.login})
 
 	case path == "/user/codespaces" && r.Method == "GET":
@@ -304,5 +309,67 @@ func TestEnsureStartsCodespaceThatShutsDownWhileWaiting(t *testing.T) {
 	}
 	if f.starts != 1 {
 		t.Fatalf("应该只请求开机 1 次，实际 %d 次", f.starts)
+	}
+}
+
+func TestHasScope(t *testing.T) {
+	got := "repo, codespace, write:packages"
+	for _, want := range []string{"repo", "codespace", "write:packages"} {
+		if !hasScope(got, want) {
+			t.Errorf("%q 应该包含 %q", got, want)
+		}
+	}
+	for _, want := range []string{"", "codespac", "admin:org", "code"} {
+		if hasScope(got, want) {
+			t.Errorf("%q 不该包含 %q", got, want)
+		}
+	}
+	if hasScope("", "codespace") {
+		t.Error("空 scope 列表不该匹配任何东西")
+	}
+}
+
+// 启动自检：token 被 GitHub 拒了，非交互环境要明确报错退出，而不是"起来了但一连就废"。
+func TestStartupCheckFailsLoudlyOnRejectedToken(t *testing.T) {
+	f := newFakeGitHub()
+	srv := f.start(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Token = "wrong-token"
+
+	// 直接用假 GitHub 走一遍 whoami，确认错误被判成"token 被拒"
+	_, err = (&api{token: "wrong-token", base: srv.URL, http: newAPI("x").http}).whoami(context.Background())
+	if err == nil {
+		t.Fatal("期望被拒")
+	}
+	if !tokenRejected(err) {
+		t.Fatalf("401 应该被判成 token 被拒，实际 %v", err)
+	}
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.Status != 401 {
+		t.Fatalf("错误类型不对：%v", err)
+	}
+	if !isBadToken(err) {
+		t.Fatal("isBadToken 应该认出它（客户端提示要靠它）")
+	}
+}
+
+// scope 齐全的 token 要能通过，并且能把 scope 读出来提醒用户。
+func TestWhoamiReadsScopes(t *testing.T) {
+	f := newFakeGitHub()
+	f.scopes = "repo, codespace"
+	srv := f.start(t)
+	info, err := (&api{token: "test-token", base: srv.URL, http: newAPI("x").http}).whoami(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Login != "octocat" {
+		t.Fatalf("login = %q", info.Login)
+	}
+	if !hasScope(info.Scopes, "codespace") {
+		t.Fatalf("scopes 没读出来：%q", info.Scopes)
 	}
 }

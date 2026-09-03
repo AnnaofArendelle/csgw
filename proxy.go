@@ -339,6 +339,12 @@ func brief(err error) string {
 	return msg
 }
 
+// isBadToken 认出"GitHub 说这个 token 不行"，用来给客户端一句可执行的提示。
+func isBadToken(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && (ae.Status == 401 || ae.Status == 403)
+}
+
 // isAuthFailure 认出"密钥被拒"这种重试也没用的错误。
 func isAuthFailure(err error) bool {
 	if err == nil {
@@ -496,7 +502,11 @@ func (c *clientConn) serveChannel(nc ssh.NewChannel) {
 	}
 	client, err := c.inner(notify)
 	if err != nil {
-		failSession(cch, pump, fmt.Sprintf("连不上 codespace：%s", err))
+		msg := fmt.Sprintf("连不上 codespace：%s", err)
+		if isBadToken(err) {
+			msg += fmt.Sprintf("\n%s: 换个 token：在网关那边跑 `%s setup`", appName, appName)
+		}
+		failSession(cch, pump, msg)
 		return
 	}
 	ich, ireqs, err := client.OpenChannel("session", nil)

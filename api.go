@@ -56,44 +56,44 @@ func newAPI(token string) *api {
 	}
 }
 
-func (a *api) do(ctx context.Context, method, path string, body, out any) error {
+func (a *api) do(ctx context.Context, method, path string, body, out any) (http.Header, error) {
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil, ctx.Err()
 			case <-time.After(time.Duration(attempt) * 2 * time.Second):
 			}
 		}
-		err := a.once(ctx, method, path, body, out)
+		hdr, err := a.once(ctx, method, path, body, out)
 		if err == nil {
-			return nil
+			return hdr, nil
 		}
 		var ae *apiError
 		if errors.As(err, &ae) && !ae.retryable() {
-			return err
+			return hdr, err
 		}
 		if ctx.Err() != nil {
-			return err
+			return hdr, err
 		}
 		last = err
 	}
-	return last
+	return nil, last
 }
 
-func (a *api) once(ctx context.Context, method, path string, body, out any) error {
+func (a *api) once(ctx context.Context, method, path string, body, out any) (http.Header, error) {
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		reader = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, a.base+path, reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -105,7 +105,7 @@ func (a *api) once(ctx context.Context, method, path string, body, out any) erro
 
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("请求 %s %s：%w", method, path, err)
+		return nil, fmt.Errorf("请求 %s %s：%w", method, path, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -122,14 +122,14 @@ func (a *api) once(ctx context.Context, method, path string, body, out any) erro
 		case resp.StatusCode == 403:
 			msg = msg + "（很可能是 token 缺少 codespace 或 repo 权限）"
 		}
-		return &apiError{Status: resp.StatusCode, Method: method, Path: path, Message: msg}
+		return resp.Header, &apiError{Status: resp.StatusCode, Method: method, Path: path, Message: msg}
 	}
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
-			return fmt.Errorf("解析 %s %s 的响应：%w", method, path, err)
+			return resp.Header, fmt.Errorf("解析 %s %s 的响应：%w", method, path, err)
 		}
 	}
-	return nil
+	return resp.Header, nil
 }
 
 // ---------- 数据结构：只留用得上的字段 ----------
@@ -160,18 +160,46 @@ type repository struct {
 }
 
 func (a *api) currentUser(ctx context.Context) (string, error) {
+	info, err := a.whoami(ctx)
+	return info.Login, err
+}
+
+// userInfo 是启动自检需要的东西：token 属于谁、有哪些 scope。
+// Scopes 来自 X-OAuth-Scopes 头，只有经典 PAT（ghp_…）会返回，
+// fine-grained token 是空字符串——那就只能等真正调用时才知道权限够不够。
+type userInfo struct {
+	Login  string
+	Scopes string
+}
+
+func (a *api) whoami(ctx context.Context) (userInfo, error) {
 	var user struct{ Login string }
-	if err := a.do(ctx, "GET", "/user", nil, &user); err != nil {
-		return "", err
+	hdr, err := a.do(ctx, "GET", "/user", nil, &user)
+	if err != nil {
+		return userInfo{}, err
 	}
-	return user.Login, nil
+	scopes := ""
+	if hdr != nil {
+		scopes = hdr.Get("X-OAuth-Scopes")
+	}
+	return userInfo{Login: user.Login, Scopes: scopes}, nil
+}
+
+// hasScope 判断 scope 列表里有没有某一项（GitHub 返回的是 "repo, codespace" 这种）。
+func hasScope(scopes, want string) bool {
+	for _, s := range strings.Split(scopes, ",") {
+		if strings.TrimSpace(s) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *api) listCodespaces(ctx context.Context) ([]codespace, error) {
 	var payload struct {
 		Codespaces []codespace `json:"codespaces"`
 	}
-	if err := a.do(ctx, "GET", "/user/codespaces?per_page=100", nil, &payload); err != nil {
+	if _, err := a.do(ctx, "GET", "/user/codespaces?per_page=100", nil, &payload); err != nil {
 		return nil, err
 	}
 	return payload.Codespaces, nil
@@ -179,7 +207,7 @@ func (a *api) listCodespaces(ctx context.Context) ([]codespace, error) {
 
 func (a *api) getCodespace(ctx context.Context, name string) (*codespace, error) {
 	var cs codespace
-	if err := a.do(ctx, "GET", "/user/codespaces/"+url.PathEscape(name), nil, &cs); err != nil {
+	if _, err := a.do(ctx, "GET", "/user/codespaces/"+url.PathEscape(name), nil, &cs); err != nil {
 		return nil, err
 	}
 	return &cs, nil
@@ -187,7 +215,7 @@ func (a *api) getCodespace(ctx context.Context, name string) (*codespace, error)
 
 // startCodespace 是幂等的：已经在跑的 codespace 不算错误。
 func (a *api) startCodespace(ctx context.Context, name string) error {
-	err := a.do(ctx, "POST", "/user/codespaces/"+url.PathEscape(name)+"/start", nil, nil)
+	_, err := a.do(ctx, "POST", "/user/codespaces/"+url.PathEscape(name)+"/start", nil, nil)
 	var ae *apiError
 	if errors.As(err, &ae) && ae.Status == 409 {
 		return nil
@@ -203,7 +231,7 @@ func (a *api) createCodespace(ctx context.Context, repoID int64, displayName str
 		"display_name":  displayName,
 	}
 	var cs codespace
-	if err := a.do(ctx, "POST", "/user/codespaces", body, &cs); err != nil {
+	if _, err := a.do(ctx, "POST", "/user/codespaces", body, &cs); err != nil {
 		return nil, err
 	}
 	if cs.Name == "" {
@@ -219,7 +247,7 @@ func (a *api) getRepo(ctx context.Context, nwo string) (*repository, error) {
 	}
 	var repo repository
 	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
-	if err := a.do(ctx, "GET", path, nil, &repo); err != nil {
+	if _, err := a.do(ctx, "GET", path, nil, &repo); err != nil {
 		return nil, err
 	}
 	return &repo, nil
@@ -235,7 +263,7 @@ func (a *api) createPublicRepo(ctx context.Context, name string) (*repository, e
 		"description": "Dev box for csgw (ssh root@codespace)",
 	}
 	var repo repository
-	if err := a.do(ctx, "POST", "/user/repos", body, &repo); err != nil {
+	if _, err := a.do(ctx, "POST", "/user/repos", body, &repo); err != nil {
 		return nil, err
 	}
 	return &repo, nil
