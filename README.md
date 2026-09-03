@@ -189,16 +189,25 @@ exec 输出/退出码/stderr 穿透、pty-req/window-change/subsystem 原样转�
   实测断开约 4–5 分钟后 codespace 自动 `Shutdown`。想更省/更耐用就去
   github.com/settings/codespaces 改，网关不用动。
 
-### 唯一还需要长时间观察的一条
+### idle 归属：已验证（这是整个工具的核心承诺）
 
-"会话挂着不动会不会被 GitHub 停掉"。这个 codespace 的 `idle_timeout_minutes=30`，
-所以判据是：挂一条空闲 SSH 会话超过 30 分钟，如果它还是 `Available`，就说明 gh 的
-活跃度上报确实把我们的会话算成了"有人在用"。测试脚本和日志：
+这个 codespace 的 `idle_timeout_minutes=5`（来自账号设置）。挂一条**完全空闲**的
+SSH 会话（远端只有一个 `sleep`，没有任何输入输出）：
 
-```bash
-/tmp/csgw-hold.sh          # 挂 30 分钟空闲会话，每 3 分钟打一次 state
-cat /tmp/csgw-hold.log
+```
+[01:42:16] 起会话（12 分钟完全空闲），idle_timeout=5 分钟
+[01:44:16] 空闲第 2 分钟：Available
+[01:46:17] 空闲第 4 分钟：Available
+[01:48:17] 空闲第 6 分钟：Available      ← 已经超过 5 分钟 idle，没被停
+[01:52:23] 空闲第 10 分钟：Available
+[01:54:38] 已断开
+[01:56:39] 断开后 2 分钟：Available
+[01:58:41] 断开后 4 分钟：Available
+[02:00:59] 断开后 6 分钟：Shutdown      ← GitHub 自己停的，网关没插手
 ```
 
-如果哪天发现"挂着的会话被停机了"，补救办法是把 `keepaliveEvery`（proxy.go）调小，
-或者在会话里跑个 `while true; do :; sleep 60; done` 之类的真实活动。
+结论：会话开着就不会被 idle 停掉（gh 的 `NotifyCodespaceOfClientActivity` 生效），
+断开之后由 GitHub 按账号里的 idle 设置自己停机。按需计费闭环成立。
+
+如果哪天发现"挂着的会话被停机了"，补救办法是把 `keepalive_seconds`（config.json）调小，
+或者在会话里跑个真实活动。
