@@ -131,6 +131,50 @@ csgw version
 固定不换，所以不会报 host key 变了；真丢了就删掉 `~/.ssh/known_hosts.csgw`）、`codespace_ed25519(.pub)`（登录 codespace 用，由 gh 注册进去）、
 `known_codespaces`（记住的远端 host key）。
 
+## 在 Termux（Android）里跑
+
+代码本身没有任何"必须是 Linux 发行版"的假设：路径都来自 `$HOME` / `$XDG_CONFIG_HOME`，
+`gh` 走 PATH 查找，端口是回环高位端口。已验证可以交叉编译出 `linux/arm64`、
+`linux/arm`、`android/arm64` 三种静态二进制。
+
+推荐**在 Termux 里直接编译**（Termux 的 Go 工具链是按 Android 配好的，DNS 之类不用操心）：
+
+```bash
+pkg update && pkg install golang git openssh gh
+git clone https://github.com/AnnaofArendelle/csgw && cd csgw
+./build.sh                      # 没有那台机器的离线缓存时会自动走正常路径
+./csgw                          # 填 token → 自动写 ~/.ssh/config → 开始监听
+# 另开一个 Termux 会话（左滑 → New session）
+ssh root@codespace
+```
+
+`gh` 是硬依赖（隧道那一步靠它）。Termux 仓库里没有的话，用
+`pkg search gh` 找一下，或者从 GitHub Releases 下 `gh_*_linux_arm64.tar.gz`。
+
+也可以在电脑上交叉编译好推过去：
+
+```bash
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -o csgw-android-arm64 .
+# 传到手机后 chmod +x；如果出现 lookup api.github.com … 127.0.0.1:53 之类的
+# DNS 报错，就说明这个交叉编译的二进制没拿到 Android 的解析器，改用上面"在 Termux 里编译"。
+```
+
+### Android 特有的坑
+
+- **别让系统把它杀了**：`termux-wake-lock` 拿住唤醒锁；再把 Termux 从电池优化里排除。
+- **Android 12+ 的 phantom process 限制**会杀后台子进程 —— csgw 每条连接都会拉起一个
+  `gh` 子进程，正好撞上。装了 adb 的话：
+  `adb shell settings put global settings_enable_monitor_phantom_procs false`。
+- **常驻**：`pkg install termux-services`，然后
+  `mkdir -p $PREFIX/var/service/csgw && printf '#!/data/data/com.termux/files/usr/bin/sh\nexec csgw 2>&1\n' > $PREFIX/var/service/csgw/run && chmod +x $PREFIX/var/service/csgw/run && sv-enable csgw`。
+  简单点就 `tmux new -d -s csgw csgw`。
+- **手机上的图形 SSH 客户端**（Termius / JuiceSSH 等）也能连：主机 `127.0.0.1`、端口 `2222`、
+  用户名随便填。
+- ⚠️ **安全边界在手机上更松**：前门是免认证的，桌面上的理由是"能连到回环地址的人已经登录了这台机器"，
+  但在 Android 上**任何一个已安装的 App 都能连 `127.0.0.1:2222`**，也就等于能进你的 codespace。
+  如果你的手机上装了不太信任的东西，就不要在 Termux 里跑它 —— 或者提需求，
+  给前门加一层密码/公钥认证（大约 60 行）。
+
 ## 代码结构
 
 ```

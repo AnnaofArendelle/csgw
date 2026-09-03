@@ -44,6 +44,8 @@ type ghCLI struct {
 var ghCandidates = []string{
 	"/usr/bin/gh", "/usr/local/bin/gh", "/opt/homebrew/bin/gh",
 	"/home/linuxbrew/.linuxbrew/bin/gh", "/snap/bin/gh",
+	// Termux（Android）：$PREFIX/bin 正常在 PATH 里，这条只是兜底
+	"/data/data/com.termux/files/usr/bin/gh",
 }
 
 func findGH(configured string) (string, error) {
