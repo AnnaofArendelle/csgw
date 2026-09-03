@@ -266,6 +266,7 @@ func (c *clientConn) inner(notify Notify) (*ssh.Client, error) {
 // 刚创建或刚开机的 codespace 里 sshd 可能要过几秒才接受连接。
 func (c *clientConn) connect(notify Notify) (*ssh.Client, *Transport, error) {
 	deadline := time.Now().Add(connectDeadline)
+	authRetries := 0
 	for attempt := 1; ; attempt++ {
 		id, err := c.gw.prov.Ensure(c.ctx, notify)
 		if err != nil {
@@ -288,7 +289,20 @@ func (c *clientConn) connect(notify Notify) (*ssh.Client, *Transport, error) {
 		}
 		if isAuthFailure(err) {
 			if h, ok := c.gw.prov.(authFailureReporter); ok {
-				h.OnAuthFailure() // 缓存的远端登录名可能过期了，下次重新问
+				h.OnAuthFailure() // 丢掉可能过期的登录名缓存
+			}
+			// 密钥被拒通常有两种原因，都能自愈：登录名缓存过期（换了 codespace），
+			// 或者刚建出来的 codespace 还没把公钥装进 authorized_keys。所以先重试
+			// 两次（重新问 gh 拿登录名），别让用户看到一次失败的 ssh。
+			authRetries++
+			if authRetries <= 2 && time.Now().Before(deadline) {
+				notify("codespace 拒绝了密钥，重新问一次登录名再试…")
+				select {
+				case <-c.ctx.Done():
+					return nil, nil, c.ctx.Err()
+				case <-time.After(5 * time.Second):
+				}
+				continue
 			}
 			return nil, nil, fmt.Errorf("codespace 拒绝了网关的密钥：%w\n"+
 				"（自定义镜像要确认装了 sshd；也可以在 config.json 里把 remote_user 写成 codespace 里的真实用户名）", err)

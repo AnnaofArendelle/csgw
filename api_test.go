@@ -25,6 +25,8 @@ type fakeGitHub struct {
 
 	// 状态机：get 到第 n 次时把状态推进到 Available
 	provisionGets int
+	// stateScript 非空时，每次 GET 弹出一个状态（用来复现具体时序）
+	stateScript []string
 
 	createdCodespaces int
 	createdRepos      int
@@ -98,7 +100,10 @@ func (f *fakeGitHub) route(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 			return
 		}
-		if cs.State != "Available" {
+		if len(f.stateScript) > 0 {
+			cs.State = f.stateScript[0]
+			f.stateScript = f.stateScript[1:]
+		} else if cs.State != "Available" {
 			f.provisionGets++
 			if f.provisionGets >= 2 { // 两次轮询之后就绪，测试才跑得快
 				cs.State = "Available"
@@ -250,5 +255,54 @@ func TestEnsureReportsBadToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "wrong-token") {
 		t.Fatalf("错误信息里泄漏了 token：%v", err)
+	}
+}
+
+// 缓存的登录名必须绑定到具体 codespace：把云端那个删了重建之后，新 codespace 的
+// 镜像可能换了用户名（Docker-Desktop 是 vscode，默认镜像是 codespace），
+// 拿旧的去登录会被拒。
+func TestCachedLoginIsScopedToCodespace(t *testing.T) {
+	f := newFakeGitHub()
+	p, cfg := testProvider(t, f)
+
+	if got := p.loginFor("cs-new"); got != "" {
+		t.Fatalf("没有缓存时应该返回空，实际 %q", got)
+	}
+	_ = cfg.remember(func(c *Config) { c.CachedUser, c.CachedUserFor = "vscode", "cs-old" })
+	if got := p.loginFor("cs-old"); got != "vscode" {
+		t.Fatalf("同一个 codespace 应该复用缓存，实际 %q", got)
+	}
+	if got := p.loginFor("cs-new"); got != "" {
+		t.Fatalf("换了 codespace 必须重新问 gh，实际 %q", got)
+	}
+	_ = cfg.remember(func(c *Config) { c.RemoteUser = "myuser" })
+	if got := p.loginFor("cs-new"); got != "myuser" {
+		t.Fatalf("配置里手写的登录名优先，实际 %q", got)
+	}
+
+	p.OnAuthFailure()
+	if cfg.CachedUser != "" || cfg.CachedUserFor != "" {
+		t.Fatalf("密钥被拒后应该清掉缓存，实际 %q/%q", cfg.CachedUser, cfg.CachedUserFor)
+	}
+}
+
+// 真踩过的坑：连接重试时 codespace 正在 ShuttingDown（idle 到点了），
+// 如果只是"等它就绪"就会一直卡在 Shutdown —— 必须等它关完再开机。
+func TestEnsureStartsCodespaceThatShutsDownWhileWaiting(t *testing.T) {
+	f := newFakeGitHub()
+	f.codespaces["box"] = &codespace{Name: "box", DisplayName: displayMarker, State: "ShuttingDown"}
+	f.stateScript = []string{"ShuttingDown", "Shutdown", "Shutdown", "Starting", "Available"}
+	p, cfg := testProvider(t, f)
+	cfg.Codespace = "box"
+
+	id, err := p.Ensure(context.Background(), silent)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if id != "box" {
+		t.Fatalf("id = %q", id)
+	}
+	if f.starts != 1 {
+		t.Fatalf("应该只请求开机 1 次，实际 %d 次", f.starts)
 	}
 }

@@ -33,9 +33,12 @@ type Config struct {
 	Repo       string `json:"repo,omitempty"`        // owner/name：建 codespace 的来源仓库；留空=自动建一个公开仓库
 	Codespace  string `json:"codespace,omitempty"`   // 记住的 codespace 名字，第一次连上后写入，之后一直复用
 	RemoteUser string `json:"remote_user,omitempty"` // 手动指定 codespace 里的登录名；留空=问 gh 并缓存
-	// CachedUser 是上一次问 gh 得到的登录名。网络抖动时这个缓存能省掉一次
-	// `gh codespace ssh --config` 往返；密钥被拒时会自动清掉重新问。
-	CachedUser string `json:"cached_user,omitempty"`
+	// CachedUser 是上一次问 gh 得到的登录名，CachedUserFor 是它属于哪个 codespace。
+	// 网络抖动时这个缓存能省掉一次 `gh codespace ssh --config` 往返；换了 codespace
+	// （比如把云端那个删了重建）就必须重新问，因为不同镜像的登录名不一样
+	// （Docker-Desktop 是 vscode，默认镜像是 codespace）。
+	CachedUser    string `json:"cached_user,omitempty"`
+	CachedUserFor string `json:"cached_user_for,omitempty"`
 	GHPath     string `json:"gh_path,omitempty"`     // gh 可执行文件路径；留空=自动找
 	// KeepaliveSeconds 是会话期间往内层连接发 keepalive 的间隔（0=关掉，负数=用默认 60）。
 	// 这点流量的作用是让 gh 持续上报"有人在用"。

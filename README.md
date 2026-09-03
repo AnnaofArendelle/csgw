@@ -145,7 +145,7 @@ proxy.go         SSH 前门 + 通用 channel 中继 + keepalive
 ## 测试
 
 ```bash
-go test ./...          # 14 个测试，约 0.3 秒
+go test ./...          # 17 个测试，约 0.3 秒
 go test -race ./...
 ```
 
@@ -174,13 +174,20 @@ exec 输出/退出码/stderr 穿透、pty-req/window-change/subsystem 原样转�
 | 断开即停止上报 | ✓ 日志：`客户端已断开；gh 子进程已退出` |
 | 新建 codespace 这条路 | ✓ 从 `AnnaofArendelle/codespace-box` 建出 `csgw-756r99g6rjvfw6rr`（display=csgw），随后删除 |
 | 网络抖动下的重试 | ✓ 第一次连接时本机到 api.github.com / tunnels 反复 TLS 超时，重试 16 次后连上（约 4 分钟） |
+| 把云端 codespace 删掉再连 | ✓ 自动从 `codespace-box` 重建并连上 |
+| 重建后登录名变了 | ✓ 旧镜像是 `vscode`、默认镜像是 `codespace`；密钥被拒后自动重新问 gh，**同一次 ssh 内**自愈 |
+| 等待期间被 idle 停机 | ✓ `ShuttingDown → Shutdown` 会等它关完再开机（不会卡在 Shutdown） |
 
-两个已知事实：
+三个已知事实：
 
 - **`last_used_at` 不是活跃度指标**：它只在 codespace 被启动时更新，会话期间不动（加上 gh 自己用的
   `?internal=true&refresh=true` 也一样）。判断"有没有被算作在用"只能看它到底什么时候被停机。
 - 实战里第一次连接失败最多的一步是 `gh codespace ssh --config`（探远端登录名）。所以探到的
-  登录名会缓存进 `config.json` 的 `cached_user`，密钥被拒时自动清掉重新问。
+  登录名会缓存进 `config.json` 的 `cached_user`，并且**绑定到具体 codespace**
+  （`cached_user_for`）；换了 codespace 一定重新问，密钥被拒时也会清掉重问。
+- **idle 时间来自你 GitHub 账号的设置**，网关一个字都不传。这个账号目前是 5 分钟：
+  实测断开约 4–5 分钟后 codespace 自动 `Shutdown`。想更省/更耐用就去
+  github.com/settings/codespaces 改，网关不用动。
 
 ### 唯一还需要长时间观察的一条
 

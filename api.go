@@ -243,37 +243,3 @@ func (a *api) createPublicRepo(ctx context.Context, name string) (*repository, e
 
 // pollInterval 是轮询 codespace 状态的间隔（测试里会调小）。
 var pollInterval = 3 * time.Second
-
-// waitAvailable 轮询到 codespace 变成 Available。
-func (a *api) waitAvailable(ctx context.Context, name string, notify Notify) (*codespace, error) {
-	start := time.Now()
-	lastState := ""
-	lastTalk := time.Now()
-	for {
-		cs, err := a.getCodespace(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		switch {
-		case cs.running():
-			return cs, nil
-		case cs.State == "Failed":
-			return nil, fmt.Errorf("codespace %s 进入 Failed 状态，去 %s 看一眼", name, cs.WebURL)
-		case cs.State == "Deleted" || cs.State == "Moved":
-			return nil, fmt.Errorf("codespace %s 已经是 %s 状态", name, cs.State)
-		}
-		if cs.State != lastState {
-			notify(fmt.Sprintf("codespace 状态：%s", cs.State))
-			lastState, lastTalk = cs.State, time.Now()
-		} else if time.Since(lastTalk) > 20*time.Second {
-			notify(fmt.Sprintf("还在等 codespace 就绪（%s，已用 %s）",
-				cs.State, time.Since(start).Round(time.Second)))
-			lastTalk = time.Now()
-		}
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("等待 codespace %s 就绪：%w", name, ctx.Err())
-		case <-time.After(pollInterval):
-		}
-	}
-}

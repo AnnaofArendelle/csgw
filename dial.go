@@ -133,16 +133,14 @@ func (g *ghCLI) remoteUser(ctx context.Context, name string) (string, error) {
 // ---------- Dial ----------
 
 func (p *codespacesProvider) Dial(ctx context.Context, id string, notify Notify) (*Transport, error) {
-	user := p.cfg.RemoteUser
+	user := p.loginFor(id)
 	if user == "" {
-		user = p.cfg.CachedUser
-	}
-	if user == "" {
+		notify("正在问 gh 这个 codespace 的登录名…")
 		var err error
 		if user, err = p.gh.remoteUser(ctx, id); err != nil {
 			return nil, err
 		}
-		if err := p.cfg.remember(func(c *Config) { c.CachedUser = user }); err != nil {
+		if err := p.cfg.remember(func(c *Config) { c.CachedUser, c.CachedUserFor = user, id }); err != nil {
 			p.log.Printf("提醒：记住远端登录名失败：%v", err)
 		}
 	}

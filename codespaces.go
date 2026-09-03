@@ -28,9 +28,9 @@ type codespacesProvider struct {
 }
 
 const (
-	ensureCreateTimeout = 20 * time.Minute
-	ensureStartTimeout  = 8 * time.Minute
-	warmFor             = 10 * time.Second // 这段时间内不重复问 GitHub 状态
+	// ensureTimeout 覆盖"查 → 建 → 开机 → 等就绪"整段（新建一个要好几分钟）。
+	ensureTimeout = 20 * time.Minute
+	warmFor       = 10 * time.Second // 这段时间内不重复问 GitHub 状态
 )
 
 func newCodespacesProvider(ctx context.Context, cfg *Config, logger *log.Logger) (*codespacesProvider, error) {
@@ -47,14 +47,26 @@ func newCodespacesProvider(ctx context.Context, cfg *Config, logger *log.Logger)
 
 func (p *codespacesProvider) Name() string { return "github-codespaces" }
 
-// OnAuthFailure：codespace 拒绝了我们的密钥，通常意味着缓存的远端登录名过期了
-// （codespace 重建过、换了镜像）。丢掉缓存，下一次重新问 gh。
+// loginFor 给出这个 codespace 该用的登录名：配置里手写的优先，其次是**属于这个
+// codespace** 的缓存。换了 codespace 就返回空，让调用方重新问 gh。
+func (p *codespacesProvider) loginFor(id string) string {
+	if u := p.cfg.RemoteUser; u != "" {
+		return u
+	}
+	if p.cfg.CachedUserFor == id {
+		return p.cfg.CachedUser
+	}
+	return ""
+}
+
+// OnAuthFailure：codespace 拒绝了我们的密钥。除了登录名可能过期，刚建出来的
+// codespace 也可能还没把公钥装进 authorized_keys。丢掉缓存，下一次重新问 gh。
 func (p *codespacesProvider) OnAuthFailure() {
 	if p.cfg.CachedUser == "" {
 		return
 	}
-	p.log.Printf("codespace 拒绝了密钥，丢掉缓存的登录名 %q，下次重新问 gh", p.cfg.CachedUser)
-	_ = p.cfg.remember(func(c *Config) { c.CachedUser = "" })
+	p.log.Printf("codespace 拒绝了密钥，丢掉缓存的登录名 %q，重新问 gh", p.cfg.CachedUser)
+	_ = p.cfg.remember(func(c *Config) { c.CachedUser, c.CachedUserFor = "", "" })
 }
 
 // Invalidate 丢掉"刚才已经就绪"的结论。连接失败之后由核心调用。
@@ -72,7 +84,7 @@ func (p *codespacesProvider) Ensure(ctx context.Context, notify Notify) (string,
 		return p.warmID, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, ensureCreateTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ensureTimeout)
 	defer cancel()
 
 	notify("正在检查 codespace 状态…")
@@ -85,25 +97,65 @@ func (p *codespacesProvider) Ensure(ctx context.Context, notify Notify) (string,
 			p.log.Printf("提醒：记住 codespace 名字失败：%v", err)
 		}
 	}
-
-	if !cs.running() {
-		if cs.stopped() {
-			notify("codespace 是停止状态，正在开机…")
-			if err := p.api.startCodespace(ctx, cs.Name); err != nil {
-				return "", fmt.Errorf("启动 codespace %s：%w", cs.Name, err)
-			}
-		} else {
-			notify(fmt.Sprintf("codespace 当前状态 %s，等它就绪…", cs.State))
-		}
-		startCtx, cancelStart := context.WithTimeout(ctx, ensureStartTimeout)
-		defer cancelStart()
-		if cs, err = p.api.waitAvailable(startCtx, cs.Name, notify); err != nil {
-			return "", err
-		}
+	if err := p.bringUp(ctx, cs, notify); err != nil {
+		return "", err
 	}
 
 	p.warmID, p.warmAt = cs.Name, time.Now()
 	return cs.Name, nil
+}
+
+// bringUp 把 codespace 弄到 Available：
+//   - 停着（Shutdown/Archived）就请求开机
+//   - 处于过渡状态（Queued/Provisioning/Starting/ShuttingDown…）就等
+//   - **等的过程中被停掉也会重新开机** —— 比如 idle 到点了正在 ShuttingDown，
+//     那就先等它关完，再开起来（只等不开会一直卡在 Shutdown）
+func (p *codespacesProvider) bringUp(ctx context.Context, cs *codespace, notify Notify) error {
+	const maxStarts = 3
+	begin := time.Now()
+	starts, lastStart := 0, time.Time{}
+	lastState, lastTalk := "", time.Now()
+
+	for {
+		switch {
+		case cs.running():
+			return nil
+		case cs.State == "Failed":
+			return fmt.Errorf("codespace %s 进入 Failed 状态，去 %s 看一眼", cs.Name, cs.WebURL)
+		case cs.State == "Deleted" || cs.State == "Moved":
+			return fmt.Errorf("codespace %s 变成了 %s 状态", cs.Name, cs.State)
+		case cs.stopped() && !cs.PendingOperation && time.Since(lastStart) > 30*time.Second:
+			if starts >= maxStarts {
+				return fmt.Errorf("请求开机 %d 次之后 codespace %s 还是 %s 状态", starts, cs.Name, cs.State)
+			}
+			starts++
+			lastStart = time.Now()
+			notify("codespace 是停止状态，正在开机…")
+			if err := p.api.startCodespace(ctx, cs.Name); err != nil {
+				return fmt.Errorf("启动 codespace %s：%w", cs.Name, err)
+			}
+		}
+
+		if cs.State != lastState {
+			notify("codespace 状态：" + cs.State)
+			lastState, lastTalk = cs.State, time.Now()
+		} else if time.Since(lastTalk) > 20*time.Second {
+			notify(fmt.Sprintf("还在等 codespace 就绪（%s，已用 %s）",
+				cs.State, time.Since(begin).Round(time.Second)))
+			lastTalk = time.Now()
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("等待 codespace %s 就绪：%w", cs.Name, ctx.Err())
+		case <-time.After(pollInterval):
+		}
+		next, err := p.api.getCodespace(ctx, cs.Name)
+		if err != nil {
+			return err
+		}
+		cs = next
+	}
 }
 
 // resolve 找到那一个 codespace，顺序是：
