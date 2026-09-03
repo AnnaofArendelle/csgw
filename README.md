@@ -4,13 +4,13 @@
 
 ```bash
 csgw                  # 启动网关（第一次会问一个 token）
-ssh root@codespace    # 完事
+ssh root@127.0.0.1 -p 2222   # 完事
 ```
 
 用不着知道 Codespaces、`gh`、Dev Tunnels 的存在。一条 `ssh` 背后：
 
 ```
-ssh root@codespace
+ssh root@127.0.0.1 -p 2222
   → 网关前门（只监听 127.0.0.1，免认证）
   → 找到那一个 codespace（记住的名字 → display name=csgw → 账号里唯一的那个 → 都没有就新建）
   → 停止状态就开机，等到 Available
@@ -71,24 +71,35 @@ ssh root@codespace
   ☆ 保存并启动
 ```
 
-token 输入不回显，当场拿去 `GET /user` 验证。保存时会把这段幂等地写进 `~/.ssh/config`：
+token 输入不回显，当场拿去 `GET /user` 验证。保存之后立刻开始监听：
 
 ```
-Host codespace
-    HostName 127.0.0.1
-    Port 2222
-    User root
-    StrictHostKeyChecking accept-new
-    UserKnownHostsFile ~/.ssh/known_hosts.csgw
-    ControlMaster auto
-    ControlPath ~/.ssh/csgw-%r@%h-%p
-    ControlPersist 10s
-    ServerAliveInterval 60
+csgw 监听 127.0.0.1:2222 · provider github-codespaces · 目标 csgw-xxxxxxxx
+连接：ssh root@127.0.0.1 -p 2222    （Ctrl-C 停止网关；停机交给 GitHub 的 idle 设置）
 ```
 
-`ControlMaster` 让第二、第三个终端秒开并复用同一条隧道；最后一个终端退出 10 秒后隧道才断。
-`root` 只是个称呼：网关用 `gh codespace ssh --config` 报告的真实登录名（`vscode`/`codespace`…）
-进 codespace，所以 `ssh 任意名字@codespace` 都能连，进去以后是那个真实用户（要 root 就 `sudo -i`）。
+用户名（`root` 或别的什么）只是个称呼，网关不看：它会用 `gh codespace ssh --config`
+报告的真实登录名（`vscode`/`codespace`…）进 codespace。所以进去之后你是那个用户，
+要 root 就 `sudo -i`。
+
+第一次连会问一次 host key（`The authenticity of host '[127.0.0.1]:2222'…`），回答 yes
+即可 —— 网关的 host key 是持久化的（`~/.config/csgw/gateway_ed25519`），不会每次变，
+启动时也会把指纹打出来（`host key SHA256:…`）好核对。
+
+如果这个端口上以前跑过别的东西（比如另一个网关），会看到
+`REMOTE HOST IDENTIFICATION HAS CHANGED` —— 那是 `known_hosts` 里的旧条目，删掉再连：
+
+```bash
+ssh-keygen -R "[127.0.0.1]:2222"
+```
+
+想让第二、第三个终端秒开并复用同一条隧道（一个 gh 子进程），自己带上 OpenSSH 的
+连接复用参数就行，网关不会去动你的 `~/.ssh/config`：
+
+```bash
+ssh -o ControlMaster=auto -o ControlPath=~/.ssh/csgw-%C -o ControlPersist=10s \
+    root@127.0.0.1 -p 2222
+```
 
 ## 第一个 codespace 从哪来
 
@@ -107,7 +118,6 @@ csgw                启动（没配置过就先走向导）
 csgw -listen 127.0.0.1:2223   换端口（只影响本次，不写进配置文件）
 csgw -no-verify     启动时不问 GitHub 校验 token（离线/脚本场景）
 csgw setup          重新配置
-csgw ssh-config     打印那段 ssh 配置（-write 写入 / -remove 删除）
 csgw version
 ```
 
@@ -128,7 +138,7 @@ csgw version
 运行期间 token 被撤销的话，错误会打到 ssh 客户端的终端上，并附一句"跑 `csgw setup` 换一个"。
 
 配置和密钥都在 `~/.config/csgw/`（0700）：`config.json`(0600)、`gateway_ed25519`（前门 host key，
-固定不换，所以不会报 host key 变了；真丢了就删掉 `~/.ssh/known_hosts.csgw`）、`codespace_ed25519(.pub)`（登录 codespace 用，由 gh 注册进去）、
+固定不换，所以不会报 host key 变了；真丢了就把 `known_hosts` 里 `[127.0.0.1]:2222` 那行删掉）、`codespace_ed25519(.pub)`（登录 codespace 用，由 gh 注册进去）、
 `known_codespaces`（记住的远端 host key）。
 
 ## 在 Termux（Android）里跑
@@ -145,7 +155,7 @@ git clone https://github.com/AnnaofArendelle/csgw && cd csgw
 ./build.sh                      # 没有那台机器的离线缓存时会自动走正常路径
 ./csgw                          # 填 token → 自动写 ~/.ssh/config → 开始监听
 # 另开一个 Termux 会话（左滑 → New session）
-ssh root@codespace
+ssh root@127.0.0.1 -p 2222
 ```
 
 `gh` 是硬依赖（隧道那一步靠它）。Termux 仓库里没有的话，用
@@ -221,7 +231,7 @@ exec 输出/退出码/stderr 穿透、pty-req/window-change/subsystem 原样转�
 
 ## 实战验证结果（2026-09-04，真 token / 真 codespace）
 
-跑通了。账号 @AnnaofArendelle，`gh` 2.99.0，全程只用一条 `ssh root@codespace`：
+跑通了。账号 @AnnaofArendelle，`gh` 2.99.0，全程只用一条 `ssh root@127.0.0.1 -p 2222`：
 
 | 验证项 | 结果 |
 |---|---|
@@ -229,10 +239,10 @@ exec 输出/退出码/stderr 穿透、pty-req/window-change/subsystem 原样转�
 | 冷启动全过程可见 | ✓ 终端里依次出现 检查状态 → 认领 → 开机 → 状态 Queued → 打开隧道 |
 | 进去之后 | ✓ `whoami`=vscode，`hostname`=codespaces-bebb72，`CODESPACES=true` |
 | 要 root | ✓ `sudo -n whoami` → root（免密 sudo） |
-| 退出码 | ✓ `ssh root@codespace 'exit 7'` → 7 |
+| 退出码 | ✓ `ssh root@127.0.0.1 -p 2222 'exit 7'` → 7 |
 | stderr 分离 | ✓ stdout/stderr 各走各的 |
 | scp 上传 / 下载 | ✓ 双向都通 |
-| 一条隧道多会话 | ✓ ControlMaster 复用，4 个会话共用一个 gh 子进程 |
+| 一条隧道多会话 | ✓ 带 ControlMaster 参数时 4 个会话共用一个 gh 子进程 |
 | 断开即停止上报 | ✓ 日志：`客户端已断开；gh 子进程已退出` |
 | 新建 codespace 这条路 | ✓ 从 `AnnaofArendelle/codespace-box` 建出 `csgw-756r99g6rjvfw6rr`（display=csgw），随后删除 |
 | 网络抖动下的重试 | ✓ 第一次连接时本机到 api.github.com / tunnels 反复 TLS 超时，重试 16 次后连上（约 4 分钟） |

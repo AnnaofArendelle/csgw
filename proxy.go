@@ -30,6 +30,9 @@ type gateway struct {
 	prov Provider
 	log  *log.Logger
 	ssh  *ssh.ServerConfig
+	// fingerprint 是前门 host key 的指纹，启动时打给用户看：
+	// 万一 known_hosts 里有别的东西留下的 [127.0.0.1]:2222，一眼能对上。
+	fingerprint string
 
 	mu      sync.Mutex
 	ln      net.Listener
@@ -51,7 +54,8 @@ func newGateway(cfg *Config, prov Provider, logger *log.Logger) (*gateway, error
 	if err != nil {
 		return nil, err
 	}
-	g := &gateway{cfg: cfg, prov: prov, log: logger, conns: map[*clientConn]struct{}{}}
+	g := &gateway{cfg: cfg, prov: prov, log: logger, conns: map[*clientConn]struct{}{},
+		fingerprint: ssh.FingerprintSHA256(signer.PublicKey())}
 	g.ssh = &ssh.ServerConfig{
 		// 只监听回环地址，所以不要求任何凭据：能连到这个端口的人本来就已经登录了
 		// 这台机器。用户名（root 或别的）只是个称呼，网关不看。
@@ -710,7 +714,13 @@ func sendExitStatus(ch ssh.Channel, code uint32) {
 	_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{code}))
 }
 
-// hostFor 从 listen 地址里取出给 ~/.ssh/config 用的主机和端口。
+// connectHint 是要打给用户看的那条连接命令。
+func connectHint(listen string) string {
+	host, port := hostFor(listen)
+	return fmt.Sprintf("ssh root@%s -p %s", host, port)
+}
+
+// hostFor 从 listen 地址里拆出主机和端口。
 func hostFor(listen string) (host, port string) {
 	h, p, err := net.SplitHostPort(listen)
 	if err != nil {

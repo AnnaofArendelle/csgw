@@ -172,9 +172,21 @@ type userInfo struct {
 	Scopes string
 }
 
+// whoami 走正常的重试逻辑。
 func (a *api) whoami(ctx context.Context) (userInfo, error) {
+	return a.whoamiWith(ctx, a.do)
+}
+
+// whoamiQuick 只试一次、不重试：启动自检用它，网络慢的时候最多耽误几秒。
+func (a *api) whoamiQuick(ctx context.Context) (userInfo, error) {
+	return a.whoamiWith(ctx, a.once)
+}
+
+type requestFunc func(ctx context.Context, method, path string, body, out any) (http.Header, error)
+
+func (a *api) whoamiWith(ctx context.Context, request requestFunc) (userInfo, error) {
 	var user struct{ Login string }
-	hdr, err := a.do(ctx, "GET", "/user", nil, &user)
+	hdr, err := request(ctx, "GET", "/user", nil, &user)
 	if err != nil {
 		return userInfo{}, err
 	}
@@ -260,7 +272,7 @@ func (a *api) createPublicRepo(ctx context.Context, name string) (*repository, e
 		"name":        name,
 		"private":     false,
 		"auto_init":   true,
-		"description": "Dev box for csgw (ssh root@codespace)",
+		"description": "Dev box for csgw (ssh root@127.0.0.1 -p 2222)",
 	}
 	var repo repository
 	if _, err := a.do(ctx, "POST", "/user/repos", body, &repo); err != nil {

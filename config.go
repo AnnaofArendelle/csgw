@@ -18,8 +18,6 @@ const (
 	appName = "csgw"
 	// defaultListen 只监听本机：能连到这个端口的人本来就已经登录了这台机器。
 	defaultListen = "127.0.0.1:2222"
-	// hostAlias 是写进 ~/.ssh/config 的别名，也就是 `ssh root@codespace` 里的那个名字。
-	hostAlias = "codespace"
 	// autoRepoName 是账号里一个 codespace 都没有时自动创建的公开仓库名字。
 	autoRepoName = "codespace-box"
 	// displayMarker 是我们建的 codespace 的 display name，用于配置丢了之后重新认领它。
@@ -39,7 +37,7 @@ type Config struct {
 	// （Docker-Desktop 是 vscode，默认镜像是 codespace）。
 	CachedUser    string `json:"cached_user,omitempty"`
 	CachedUserFor string `json:"cached_user_for,omitempty"`
-	GHPath     string `json:"gh_path,omitempty"`     // gh 可执行文件路径；留空=自动找
+	GHPath        string `json:"gh_path,omitempty"` // gh 可执行文件路径；留空=自动找
 	// KeepaliveSeconds 是会话期间往内层连接发 keepalive 的间隔（0=关掉，负数=用默认 60）。
 	// 这点流量的作用是让 gh 持续上报"有人在用"。
 	KeepaliveSeconds int `json:"keepalive_seconds,omitempty"`
